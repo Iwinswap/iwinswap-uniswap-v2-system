@@ -198,13 +198,30 @@ func testSetupSystem(t *testing.T, cfg *systemTestConfig) *testSystem {
 
 	reg := prometheus.NewRegistry()
 
-	sys, err := NewUniswapV2System(ctx, "test_system", reg, ts.BlockEventer,
-		func() (ethclients.ETHClient, error) { return ts.TestClient, nil },
-		inBlockedListFunc, poolInitializerFunc, discoverPoolsFunc, updatedInBlockFunc, getReservesFunc,
-		ts.Persistence.TokenAddressToID, ts.Persistence.PoolAddressToID, ts.Persistence.PoolIDToAddress,
-		ts.Persistence.RegisterPool, errorHandler, testBloomFunc,
-		cfg.pruneFrequency, cfg.initFrequency, cfg.resyncFrequency,
-	)
+	// Populate the new Config struct for system initialization.
+	config := &Config{
+		SystemName:       "test_system",
+		PrometheusReg:    reg,
+		NewBlockEventer:  ts.BlockEventer,
+		GetClient:        func() (ethclients.ETHClient, error) { return ts.TestClient, nil },
+		InBlockedList:    inBlockedListFunc,
+		PoolInitializer:  poolInitializerFunc,
+		DiscoverPools:    discoverPoolsFunc,
+		UpdatedInBlock:   updatedInBlockFunc,
+		GetReserves:      getReservesFunc,
+		TokenAddressToID: ts.Persistence.TokenAddressToID,
+		PoolAddressToID:  ts.Persistence.PoolAddressToID,
+		PoolIDToAddress:  ts.Persistence.PoolIDToAddress,
+		RegisterPool:     ts.Persistence.RegisterPool,
+		ErrorHandler:     errorHandler,
+		TestBloom:        testBloomFunc,
+		PruneFrequency:   cfg.pruneFrequency,
+		InitFrequency:    cfg.initFrequency,
+		ResyncFrequency:  cfg.resyncFrequency,
+	}
+
+	// Call the constructor with the new config object.
+	sys, err := NewUniswapV2System(ctx, config)
 	require.NoError(t, err)
 
 	ts.System = sys // Assign the system back to the struct
