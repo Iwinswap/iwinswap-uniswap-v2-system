@@ -102,21 +102,45 @@ type systemTestConfig struct {
 }
 
 type testSystem struct {
-	System         *UniswapV2System
-	Persistence    *mockPersistence
-	TestClient     *ethclients.TestETHClient
-	BlockEventer   chan *types.Block
-	CapturedErrors *[]error
-	cancel         context.CancelFunc
+	System       *UniswapV2System
+	Persistence  *mockPersistence
+	TestClient   *ethclients.TestETHClient
+	BlockEventer chan *types.Block
+	cancel       context.CancelFunc
+
+	// errorMu protects capturedErrors
+	errorMu        sync.Mutex
+	capturedErrors []error
+}
+
+// AddError safely adds an error to the capturedErrors slice.
+func (ts *testSystem) AddError(err error) {
+	ts.errorMu.Lock()
+	defer ts.errorMu.Unlock()
+	ts.capturedErrors = append(ts.capturedErrors, err)
+}
+
+// GetErrors safely returns a copy of the captured errors.
+func (ts *testSystem) GetErrors() []error {
+	ts.errorMu.Lock()
+	defer ts.errorMu.Unlock()
+	// Return a copy to prevent race conditions on the slice itself
+	// if the caller modifies it or holds it while other goroutines add errors.
+	errsCopy := make([]error, len(ts.capturedErrors))
+	copy(errsCopy, ts.capturedErrors)
+	return errsCopy
 }
 
 func testSetupSystem(t *testing.T, cfg *systemTestConfig) *testSystem {
-	persistence := newMockPersistence()
-	blockEventer := make(chan *types.Block, 50)
-	var capturedErrors []error
-	errorMutex := &sync.Mutex{}
 	ctx, cancel := context.WithCancel(context.Background())
-	testClient := ethclients.NewTestETHClient()
+
+	// Create the testSystem instance first, so its methods can be used in closures.
+	ts := &testSystem{
+		Persistence:  newMockPersistence(),
+		TestClient:   ethclients.NewTestETHClient(),
+		BlockEventer: make(chan *types.Block, 50),
+		cancel:       cancel,
+	}
 
 	if cfg == nil {
 		cfg = &systemTestConfig{}
@@ -169,30 +193,23 @@ func testSetupSystem(t *testing.T, cfg *systemTestConfig) *testSystem {
 		testBloomFunc = func(b types.Bloom) bool { return true }
 	}
 	errorHandler := func(err error) {
-		errorMutex.Lock()
-		capturedErrors = append(capturedErrors, err)
-		errorMutex.Unlock()
+		ts.AddError(err)
 	}
 
 	reg := prometheus.NewRegistry()
 
-	sys, err := NewUniswapV2System(ctx, "test_system", reg, blockEventer,
-		func() (ethclients.ETHClient, error) { return testClient, nil },
+	sys, err := NewUniswapV2System(ctx, "test_system", reg, ts.BlockEventer,
+		func() (ethclients.ETHClient, error) { return ts.TestClient, nil },
 		inBlockedListFunc, poolInitializerFunc, discoverPoolsFunc, updatedInBlockFunc, getReservesFunc,
-		persistence.TokenAddressToID, persistence.PoolAddressToID, persistence.PoolIDToAddress,
-		persistence.RegisterPool, errorHandler, testBloomFunc,
+		ts.Persistence.TokenAddressToID, ts.Persistence.PoolAddressToID, ts.Persistence.PoolIDToAddress,
+		ts.Persistence.RegisterPool, errorHandler, testBloomFunc,
 		cfg.pruneFrequency, cfg.initFrequency, cfg.resyncFrequency,
 	)
 	require.NoError(t, err)
 
-	return &testSystem{
-		System:         sys,
-		Persistence:    persistence,
-		TestClient:     testClient,
-		BlockEventer:   blockEventer,
-		CapturedErrors: &capturedErrors,
-		cancel:         cancel,
-	}
+	ts.System = sys // Assign the system back to the struct
+
+	return ts
 }
 
 // --- Test Helper Functions ---
@@ -203,12 +220,12 @@ func testNewBlock(number uint64) *types.Block {
 
 // --- Test Suite ---
 
-func TestUniswapV2System_Async(t *testing.T) {
+func TestUniswapV2System(t *testing.T) {
 	addr1 := common.HexToAddress("0x1")
 	addr2 := common.HexToAddress("0x2")
 
 	// Previous tests are maintained...
-	t.Run("HappyPath_AsyncInitialization", func(t *testing.T) {
+	t.Run("HappyPathInitialization", func(t *testing.T) {
 		cfg := &systemTestConfig{
 			initFrequency: 10 * time.Millisecond,
 			discoverPools: func(logs []types.Log) ([]common.Address, error) {
@@ -235,10 +252,10 @@ func TestUniswapV2System_Async(t *testing.T) {
 
 		ts.BlockEventer <- testNewBlock(2)
 		require.Eventually(t, func() bool { return len(ts.System.View()) == 2 }, time.Second, 5*time.Millisecond, "pool 2 should be initialized")
-		assert.Empty(t, *ts.CapturedErrors)
+		assert.Empty(t, ts.GetErrors())
 	})
 
-	t.Run("Failure_AsyncInitialization", func(t *testing.T) {
+	t.Run("FailureInitialization", func(t *testing.T) {
 		failingAddr := common.HexToAddress("0xdead")
 		expectedErr := errors.New("forced initializer failure")
 		cfg := &systemTestConfig{
@@ -257,14 +274,14 @@ func TestUniswapV2System_Async(t *testing.T) {
 		ts := testSetupSystem(t, cfg)
 		defer ts.cancel()
 		ts.BlockEventer <- testNewBlock(1)
-		require.Eventually(t, func() bool { return len(*ts.CapturedErrors) > 0 }, time.Second, 5*time.Millisecond, "error should be captured")
+		require.Eventually(t, func() bool { return len(ts.GetErrors()) > 0 }, time.Second, 5*time.Millisecond, "error should be captured")
 		var initErr *InitializationError
-		require.ErrorAs(t, (*ts.CapturedErrors)[0], &initErr)
+		require.ErrorAs(t, ts.GetErrors()[0], &initErr)
 		assert.ErrorIs(t, initErr.Err, expectedErr)
 		assert.Len(t, ts.System.View(), 0)
 	})
 
-	t.Run("Pruner_RemovesBlockedPool_Async", func(t *testing.T) {
+	t.Run("Pruner_RemovesBlockedPool", func(t *testing.T) {
 		isBlocked := &atomic.Bool{}
 		cfg := &systemTestConfig{
 			pruneFrequency: 20 * time.Millisecond,
@@ -299,7 +316,7 @@ func TestUniswapV2System_Async(t *testing.T) {
 		ts.BlockEventer <- testNewBlock(1)
 		require.Eventually(t, func() bool { return ts.System.LastUpdatedAtBlock() == 1 }, time.Second, 5*time.Millisecond)
 		require.Eventually(t, func() bool { return len(ts.System.View()) == 1 }, time.Second, 5*time.Millisecond, "pool should be initialized despite same-block update")
-		assert.Empty(t, *ts.CapturedErrors, "No error should be captured for premature update")
+		assert.Empty(t, ts.GetErrors(), "No error should be captured for premature update")
 
 		view := ts.System.View()
 		assert.Equal(t, big.NewInt(100), view[0].Reserve0, "Reserves should be from the initializer, not the premature update")
@@ -402,6 +419,6 @@ func TestUniswapV2System_Async(t *testing.T) {
 			return latestView[0].Reserve0.Cmp(correctReserve) == 0
 		}, 2*time.Second, 10*time.Millisecond, "reconciler should have corrected the reserves to 999")
 
-		assert.Empty(t, *ts.CapturedErrors)
+		assert.Empty(t, ts.GetErrors())
 	})
 }
