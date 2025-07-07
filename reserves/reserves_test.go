@@ -184,7 +184,7 @@ func TestGetReserves(t *testing.T) {
 				cancel() // Cancel context immediately
 			}
 
-			r0s, r1s, errs := GetReserves(ctx, tc.poolAddrs, client)
+			r0s, r1s, errs := NewGetReserves(10)(ctx, tc.poolAddrs, client)
 
 			if tc.validate != nil {
 				tc.validate(t, r0s, r1s, errs)

@@ -24,55 +24,71 @@ const (
 	defaultRPCTimeout = 10 * time.Second
 )
 
-// GetReserves fetches the reserves for a batch of pool addresses concurrently.
-// It matches the uniswapv2.GetReservesFunc type and can be injected as a dependency.
-func GetReserves(
+// NewGetReserves returns a new function for fetching reserves that limits the
+// number of concurrent RPC calls to the provided `maxConcurrentCalls`.
+// it  returns a function that matches the uniswapv2.GetReservesFunc type and can be injected as a dependency
+func NewGetReserves(
+	maxConcurrentCalls int,
+) func(
 	ctx context.Context,
 	poolAddrs []common.Address,
 	client ethclients.ETHClient,
 ) (reserve0s, reserve1s []*big.Int, errs []error) {
-	numPools := len(poolAddrs)
-	if numPools == 0 {
-		return nil, nil, nil
+
+	// The returned function closes over the semaphore channel.
+	semaphore := make(chan struct{}, maxConcurrentCalls)
+
+	return func(
+		ctx context.Context,
+		poolAddrs []common.Address,
+		client ethclients.ETHClient,
+	) (reserve0s, reserve1s []*big.Int, errs []error) {
+		numPools := len(poolAddrs)
+		if numPools == 0 {
+			return nil, nil, nil
+		}
+
+		// Pre-allocate result slices to the exact size needed. This is crucial for
+		// safely writing results from concurrent goroutines into the correct index.
+		reserve0s = make([]*big.Int, numPools)
+		reserve1s = make([]*big.Int, numPools)
+		errs = make([]error, numPools)
+
+		var wg sync.WaitGroup
+		wg.Add(numPools)
+
+		for i, addr := range poolAddrs {
+			// This will block until a spot is available in the semaphore channel,
+			// effectively limiting the number of concurrent goroutines.
+			semaphore <- struct{}{}
+
+			go func(index int, poolAddr common.Address) {
+				defer func() {
+					// Release the spot in the semaphore channel once the goroutine is done.
+					<-semaphore
+					wg.Done()
+				}()
+
+				if ctx.Err() != nil {
+					errs[index] = ctx.Err()
+					return
+				}
+
+				r0, r1, err := getReservesForPool(ctx, poolAddr, client)
+				if err != nil {
+					errs[index] = err
+					return
+				}
+
+				reserve0s[index] = r0
+				reserve1s[index] = r1
+			}(i, addr)
+		}
+
+		wg.Wait()
+
+		return reserve0s, reserve1s, errs
 	}
-
-	// Pre-allocate result slices to the exact size needed. This is crucial for
-	// safely writing results from concurrent goroutines into the correct index.
-	reserve0s = make([]*big.Int, numPools)
-	reserve1s = make([]*big.Int, numPools)
-	errs = make([]error, numPools)
-
-	var wg sync.WaitGroup
-	wg.Add(numPools)
-
-	for i, addr := range poolAddrs {
-		// Launch a goroutine for each pool address to fetch reserves in parallel.
-		go func(index int, poolAddr common.Address) {
-			defer wg.Done()
-
-			// Check if the parent context has been cancelled before starting work.
-			if ctx.Err() != nil {
-				errs[index] = ctx.Err()
-				return
-			}
-
-			// Fetch reserves for a single pool.
-			r0, r1, err := getReservesForPool(ctx, poolAddr, client)
-			if err != nil {
-				errs[index] = err
-				return
-			}
-
-			// Store the results in the correct slice index.
-			reserve0s[index] = r0
-			reserve1s[index] = r1
-		}(i, addr)
-	}
-
-	// Block here until all goroutines have completed.
-	wg.Wait()
-
-	return reserve0s, reserve1s, errs
 }
 
 // getReservesForPool performs the actual RPC call for a single pool.
