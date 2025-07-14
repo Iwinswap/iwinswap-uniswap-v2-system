@@ -1,6 +1,7 @@
 package uniswapv2
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -80,4 +81,34 @@ func (e *PrunerError) Error() string {
 
 func (e *PrunerError) Unwrap() error {
 	return e.Err
+}
+
+// determineErrorType inspects an error to classify it based on its underlying type.
+// This helps in categorizing errors for metrics and logging. The order of checks
+// is important for wrapped errors to ensure the most specific type is matched first.
+func determineErrorType(err error) string {
+	var regErr *RegistrationError
+	var consistencyErr *DataConsistencyError
+	var initErr *InitializationError
+	var updateErr *UpdateError
+	var prunerErr *PrunerError
+
+	// Check from most specific to most general.
+	if errors.As(err, &regErr) {
+		return "critical_registration"
+	}
+	if errors.As(err, &consistencyErr) {
+		return "critical_consistency"
+	}
+	if errors.As(err, &initErr) {
+		return "pool_initialization"
+	}
+	if errors.As(err, &updateErr) {
+		return "pool_update"
+	}
+	if errors.As(err, &prunerErr) {
+		return "pruner"
+	}
+
+	return "unknown"
 }
