@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -15,6 +17,15 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+// Logger defines a standard interface for structured, leveled logging,
+// compatible with the standard library's slog.
+type Logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}
 
 // --- Function Type Definitions for Dependencies ---
 
@@ -53,6 +64,7 @@ type Config struct {
 	PruneFrequency   time.Duration
 	InitFrequency    time.Duration
 	ResyncFrequency  time.Duration
+	Logger           Logger
 }
 
 // validate checks that all essential fields in the Config are provided.
@@ -129,6 +141,7 @@ type UniswapV2System struct {
 	mu                 sync.RWMutex
 	registry           *UniswapV2Registry
 	metrics            *Metrics
+	logger             Logger
 }
 
 // NewUniswapV2System constructs and returns a new, fully initialized system.
@@ -136,6 +149,11 @@ type UniswapV2System struct {
 func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("invalid uniswapv2 system configuration: %w", err)
+	}
+
+	if cfg.Logger == nil {
+		// default to a silent logger.
+		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	metrics := NewMetrics(cfg.PrometheusReg)
@@ -154,25 +172,11 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 		poolIDToAddress:  cfg.PoolIDToAddress,
 		registerPool:     cfg.RegisterPool,
 		errorHandler: func(err error) {
-			errorType := "unknown"
-			var initErr *InitializationError
-			var regErr *RegistrationError
-			var consistencyErr *DataConsistencyError
-			var updateErr *UpdateError
-			var prunerErr *PrunerError
-
-			if errors.As(err, &regErr) {
-				errorType = "critical_registration"
-			} else if errors.As(err, &consistencyErr) {
-				errorType = "critical_consistency"
-			} else if errors.As(err, &initErr) {
-				errorType = "pool_initialization"
-			} else if errors.As(err, &updateErr) {
-				errorType = "pool_update"
-			} else if errors.As(err, &prunerErr) {
-				errorType = "pruner"
-			}
+			errorType := determineErrorType(err)
+			cfg.Logger.Error("UniswapV2System internal error", "system", cfg.SystemName, "type", errorType, "error", err)
 			metrics.ErrorsTotal.WithLabelValues(cfg.SystemName, errorType).Inc()
+
+			// 3. Call the user's external handler.
 			cfg.ErrorHandler(err)
 		},
 		testBloom:          cfg.TestBloom,
@@ -183,9 +187,11 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 		pendingInit:        make(map[common.Address]struct{}),
 		lastUpdatedAtBlock: 0,
 		metrics:            metrics,
+		logger:             cfg.Logger,
 	}
 
 	system.cachedView.Store(&[]PoolView{})
+	system.logger.Info("UniswapV2System started", "system", system.systemName)
 	go system.listenBlockEventer(ctx)
 	go system.startPruner(ctx)
 	go system.startInitializer(ctx)
@@ -241,6 +247,7 @@ func (s *UniswapV2System) listenBlockEventer(ctx context.Context) {
 			}
 			timer.ObserveDuration()
 		case <-ctx.Done():
+			s.logger.Info("UniswapV2System stopping due to context cancellation.")
 			return
 		}
 	}
@@ -250,6 +257,7 @@ func (s *UniswapV2System) listenBlockEventer(ctx context.Context) {
 // and queues slow pool initializations for asynchronous processing.
 func (s *UniswapV2System) handleNewBlock(ctx context.Context, b *types.Block) error {
 	blockNum := b.NumberU64()
+	s.logger.Debug("Processing new block", "blockNumber", blockNum, "tx_count", len(b.Transactions()))
 	client, err := s.getClient()
 	if err != nil {
 		return fmt.Errorf("block %d: failed to get eth client: %w", blockNum, err)
@@ -266,6 +274,14 @@ func (s *UniswapV2System) handleNewBlock(ctx context.Context, b *types.Block) er
 	discoveredPoolAddrs, err := s.discoverPools(logs)
 	if err != nil {
 		s.errorHandler(&SystemError{BlockNumber: blockNum, Err: fmt.Errorf("failed to discover pools: %w", err)})
+	}
+
+	if len(discoveredPoolAddrs) > 0 {
+		s.logger.Info(
+			"Discovered new pools in block",
+			"blockNumber", blockNum,
+			"count", len(discoveredPoolAddrs),
+		)
 	}
 
 	var capturedErrors []error
@@ -344,6 +360,8 @@ func (s *UniswapV2System) runPendingInitializations(ctx context.Context) {
 		return
 	}
 
+	s.logger.Info("Running pool initializer", "count", len(poolsToInit))
+
 	client, err := s.getClient()
 	if err != nil {
 		s.errorHandler(fmt.Errorf("initializer: failed to get eth client: %w", err))
@@ -366,6 +384,11 @@ func (s *UniswapV2System) runPendingInitializations(ctx context.Context) {
 	}()
 
 	if successfulInits > 0 {
+		s.logger.Info(
+			"Successfully initialized new pools",
+			"count", successfulInits,
+			"failed", len(initErrors),
+		)
 		s.metrics.PoolsInitialized.WithLabelValues(s.systemName).Add(float64(successfulInits))
 	}
 	for _, e := range initErrors {
@@ -449,6 +472,10 @@ func (s *UniswapV2System) runStateReconciliation(ctx context.Context) {
 	if len(updatesToApply) > 0 {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		s.logger.Info(
+			"Reconciler found state drift, applying updates",
+			"pools_to_update", len(updatesToApply),
+		)
 		for _, update := range updatesToApply {
 			// A block number of 0 signifies a reconciliation update, not an event-driven one.
 			if err := updatePool(update.reserve0, update.reserve1, update.poolID, s.registry); err != nil {
@@ -586,6 +613,7 @@ func (s *UniswapV2System) pruneBlockedPools() {
 
 	if len(poolsToDelete) > 0 {
 		s.mu.Lock()
+		s.logger.Info("Pruner removing blocked pools", "count", len(poolsToDelete))
 		for _, poolID := range poolsToDelete {
 			if err := deletePool(poolID, s.registry); err != nil {
 				capturedErrors = append(capturedErrors, &PrunerError{PoolID: poolID, Err: fmt.Errorf("failed to delete from registry: %w", err)})
