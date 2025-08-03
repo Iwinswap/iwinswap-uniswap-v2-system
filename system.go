@@ -131,7 +131,7 @@ type UniswapV2System struct {
 	registerPool       RegisterPoolFunc
 	poolIDToAddress    IDToAddressFunc
 	cachedView         atomic.Pointer[[]PoolView]
-	lastUpdatedAtBlock uint64
+	lastUpdatedAtBlock atomic.Uint64
 	errorHandler       ErrorHandlerFunc
 	testBloom          TestBloomFunc
 	pruneFrequency     time.Duration
@@ -185,7 +185,7 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 		resyncFrequency:    cfg.ResyncFrequency,
 		registry:           NewUniswapV2Registry(),
 		pendingInit:        make(map[common.Address]struct{}),
-		lastUpdatedAtBlock: 0,
+		lastUpdatedAtBlock: atomic.Uint64{},
 		metrics:            metrics,
 		logger:             cfg.Logger,
 	}
@@ -214,9 +214,7 @@ func (s *UniswapV2System) View() []PoolView {
 
 // LastUpdatedAtBlock returns the block number of the last successfully processed block.
 func (s *UniswapV2System) LastUpdatedAtBlock() uint64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.lastUpdatedAtBlock
+	return s.lastUpdatedAtBlock.Load()
 }
 
 // updateCachedView generates a fresh view from the registry and atomically updates the pointer.
@@ -236,7 +234,7 @@ func (s *UniswapV2System) listenBlockEventer(ctx context.Context) {
 
 			if !s.testBloom(b.Bloom()) {
 				s.mu.Lock()
-				s.lastUpdatedAtBlock = b.NumberU64()
+				s.lastUpdatedAtBlock.Store(b.NumberU64())
 				s.mu.Unlock()
 				s.metrics.LastProcessedBlock.WithLabelValues(s.systemName).Set(float64(b.NumberU64()))
 				timer.ObserveDuration()
@@ -306,7 +304,7 @@ func (s *UniswapV2System) handleNewBlock(ctx context.Context, b *types.Block) er
 			}
 		}
 
-		s.lastUpdatedAtBlock = blockNum
+		s.lastUpdatedAtBlock.Store(blockNum)
 		s.updateCachedView()
 	}()
 
