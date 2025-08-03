@@ -253,7 +253,11 @@ func (s *UniswapV2System) listenBlockEventer(ctx context.Context) {
 // and queues slow pool initializations for asynchronous processing.
 func (s *UniswapV2System) handleNewBlock(ctx context.Context, b *types.Block) error {
 	blockNum := b.NumberU64()
-	s.logger.Debug("Processing new block", "blockNumber", blockNum, "tx_count", len(b.Transactions()))
+	start := time.Now()
+	defer func() {
+		s.logger.Info("Processed new block", "blockNumber", blockNum, "tx_count", len(b.Transactions()), "duration", time.Since(start))
+	}()
+
 	client, err := s.getClient()
 	if err != nil {
 		return fmt.Errorf("block %d: failed to get eth client: %w", blockNum, err)
