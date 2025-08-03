@@ -233,9 +233,7 @@ func (s *UniswapV2System) listenBlockEventer(ctx context.Context) {
 			timer := prometheus.NewTimer(s.metrics.BlockProcessingDur.WithLabelValues(s.systemName))
 
 			if !s.testBloom(b.Bloom()) {
-				s.mu.Lock()
 				s.lastUpdatedAtBlock.Store(b.NumberU64())
-				s.mu.Unlock()
 				s.metrics.LastProcessedBlock.WithLabelValues(s.systemName).Set(float64(b.NumberU64()))
 				timer.ObserveDuration()
 				continue
