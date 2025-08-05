@@ -627,3 +627,25 @@ func (s *UniswapV2System) pruneBlockedPools() {
 		s.errorHandler(err)
 	}
 }
+
+// DeletePool removes a pool from the UniswapV2System's internal registry.
+//
+// @note This is a low-level method that must be called hierarchically,
+// typically from a central registry manager that can orchestrate the deletion
+// across all necessary application subsystems.
+//
+// ⚠️ WARNING: Calling this function in isolation WILL lead to state
+// inconsistency, as it does not affect dependent components. For a safe, application-wide deletion, use the
+// appropriate manager-level method.
+func (s *UniswapV2System) DeletePool(poolID uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := deletePool(poolID, s.registry)
+	if err != nil {
+		return err
+	}
+
+	// After any modification to the registry, the cached view must be updated.
+	s.updateCachedView()
+	return nil
+}

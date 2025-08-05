@@ -438,4 +438,49 @@ func TestUniswapV2System(t *testing.T) {
 
 		assert.Empty(t, ts.GetErrors())
 	})
+
+	t.Run("DeletePool_RemovesPoolAndErrorsOnDoubleDelete", func(t *testing.T) {
+		// 1. Setup: Discover and initialize two pools.
+		cfg := &systemTestConfig{
+			initFrequency: 10 * time.Millisecond,
+			discoverPools: func(logs []types.Log) ([]common.Address, error) {
+				return []common.Address{addr1, addr2}, nil
+			},
+		}
+		ts := testSetupSystem(t, cfg)
+		defer ts.cancel()
+
+		// Wait for the system to process the block and initialize the pools.
+		ts.BlockEventer <- testNewBlock(1)
+		require.Eventually(t, func() bool {
+			return len(ts.System.View()) == 2
+		}, time.Second, 5*time.Millisecond, "both pools should be initialized")
+
+		// Get the registered IDs for the pools.
+		poolID1, err := ts.Persistence.PoolAddressToID(addr1)
+		require.NoError(t, err)
+		poolID2, err := ts.Persistence.PoolAddressToID(addr2)
+		require.NoError(t, err)
+
+		// 2. Execute a successful deletion.
+		err = ts.System.DeletePool(poolID1)
+		require.NoError(t, err, "first deletion of a valid pool should succeed")
+
+		// 3. Verify the state after deletion.
+		view := ts.System.View()
+		require.Len(t, view, 1, "view should contain exactly one pool after deletion")
+		assert.Equal(t, poolID2, view[0].ID, "the remaining pool should be poolID2")
+
+		// 4. Test error cases.
+		// Attempt to delete the same pool again.
+		err = ts.System.DeletePool(poolID1)
+		require.Error(t, err, "deleting the same pool twice should return an error")
+
+		// Attempt to delete a pool that never existed.
+		err = ts.System.DeletePool(9999)
+		require.Error(t, err, "deleting a non-existent pool ID should return an error")
+
+		// 5. Final check for unexpected background errors.
+		assert.Empty(t, ts.GetErrors())
+	})
 }
