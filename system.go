@@ -417,8 +417,8 @@ func (s *UniswapV2System) startStateReconciler(ctx context.Context) {
 // runStateReconciliation performs a single cycle of fetching on-chain reserves for all known
 // pools and updating the local state if any discrepancies are found.
 func (s *UniswapV2System) runStateReconciliation(ctx context.Context) {
-	currentView := s.View()
-	if len(currentView) == 0 {
+	prevView := s.View()
+	if len(prevView) == 0 {
 		return
 	}
 
@@ -428,10 +428,10 @@ func (s *UniswapV2System) runStateReconciliation(ctx context.Context) {
 		return
 	}
 
-	currentReserves := make(map[uint64]PoolView, len(currentView))
-	poolAddrs := make([]common.Address, 0, len(currentView))
-	poolIDs := make([]uint64, 0, len(currentView))
-	for _, view := range currentView {
+	prevViewMap := make(map[uint64]PoolView, len(prevView))
+	poolAddrs := make([]common.Address, 0, len(prevView))
+	poolIDs := make([]uint64, 0, len(prevView))
+	for _, view := range prevView {
 		addr, err := s.poolIDToAddress(view.ID)
 		if err != nil {
 			s.errorHandler(&PrunerError{PoolID: view.ID, Err: fmt.Errorf("reconciler could not get address: %w", err)})
@@ -439,10 +439,16 @@ func (s *UniswapV2System) runStateReconciliation(ctx context.Context) {
 		}
 		poolAddrs = append(poolAddrs, addr)
 		poolIDs = append(poolIDs, view.ID)
-		currentReserves[view.ID] = view
+		prevViewMap[view.ID] = view
 	}
 
 	freshReserve0s, freshReserve1s, errs := s.getReserves(ctx, poolAddrs, client)
+
+	currentView := s.View()
+	currentViewMap := make(map[uint64]PoolView, len(currentView))
+	for _, view := range currentView {
+		currentViewMap[view.ID] = view
+	}
 
 	var updatesToApply []struct {
 		poolID   uint64
@@ -456,11 +462,26 @@ func (s *UniswapV2System) runStateReconciliation(ctx context.Context) {
 		}
 
 		poolID := poolIDs[i]
-		current := currentReserves[poolID]
+		prev := prevViewMap[poolID]
+		current, ok := currentViewMap[poolID]
+		if !ok {
+			// pool no longer in system
+			continue
+		}
+
 		freshR0 := freshReserve0s[i]
 		freshR1 := freshReserve1s[i]
 
-		if current.Reserve0.Cmp(freshR0) != 0 || current.Reserve1.Cmp(freshR1) != 0 {
+		// Check if the pool was idle (i.e., not updated by the real-time loop)
+		// during our on-chain data fetch.
+		isIdle := prev.Reserve0.Cmp(current.Reserve0) == 0 && prev.Reserve1.Cmp(current.Reserve1) == 0
+
+		// Now check if the idle pool's state is stale compared to the fresh on-chain data.
+		isStale := current.Reserve0.Cmp(freshR0) != 0 || current.Reserve1.Cmp(freshR1) != 0
+
+		// Only update if a pool was idle AND is now stale. This prevents us from overwriting
+		// fresh data from the real-time loop with slightly older data from the reconciler.
+		if isIdle && isStale {
 			updatesToApply = append(updatesToApply, struct {
 				poolID   uint64
 				reserve0 *big.Int
