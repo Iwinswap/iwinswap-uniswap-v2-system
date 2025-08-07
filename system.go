@@ -64,6 +64,7 @@ type Config struct {
 	RegisterPools    RegisterPoolsFunc
 	ErrorHandler     ErrorHandlerFunc
 	TestBloom        TestBloomFunc
+	FilterTopics     [][]common.Hash // Optional: Injected topics for log filtering for performance.
 	PruneFrequency   time.Duration
 	InitFrequency    time.Duration
 	ResyncFrequency  time.Duration
@@ -117,6 +118,10 @@ func (c *Config) validate() error {
 	if c.TestBloom == nil {
 		return errors.New("test bloom function is required")
 	}
+	if len(c.FilterTopics) == 0 {
+		return errors.New("filter topics are required for performance")
+	}
+
 	return nil
 }
 
@@ -141,6 +146,7 @@ type UniswapV2System struct {
 	lastUpdatedAtBlock atomic.Uint64
 	errorHandler       ErrorHandlerFunc
 	testBloom          TestBloomFunc
+	filterTopics       [][]common.Hash // Store topics for use in handleNewBlock
 	pruneFrequency     time.Duration
 	initFrequency      time.Duration
 	resyncFrequency    time.Duration
@@ -188,6 +194,7 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 			cfg.ErrorHandler(err)
 		},
 		testBloom:          cfg.TestBloom,
+		filterTopics:       cfg.FilterTopics,
 		pruneFrequency:     cfg.PruneFrequency,
 		initFrequency:      cfg.InitFrequency,
 		resyncFrequency:    cfg.ResyncFrequency,
@@ -273,7 +280,13 @@ func (s *UniswapV2System) handleNewBlock(ctx context.Context, b *types.Block) er
 
 	// Start timer for the FilterLogs RPC call
 	filterStart := time.Now()
-	logs, err := client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: b.Number(), ToBlock: b.Number()})
+	logs, err := client.FilterLogs(
+		ctx,
+		ethereum.FilterQuery{
+			FromBlock: b.Number(),
+			ToBlock:   b.Number(),
+			Topics:    s.filterTopics,
+		})
 	s.logger.Info("FilterLogs RPC call completed", "blockNumber", blockNum, "duration", time.Since(filterStart))
 
 	if err != nil {

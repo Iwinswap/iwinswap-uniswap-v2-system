@@ -231,6 +231,7 @@ func testSetupSystem(t *testing.T, cfg *systemTestConfig) *testSystem {
 		RegisterPools:    ts.Persistence.RegisterPools,
 		ErrorHandler:     errorHandler,
 		TestBloom:        testBloomFunc,
+		FilterTopics:     [][]common.Hash{{common.HexToHash("0x1234")}}, // Provide a mock topic
 		PruneFrequency:   cfg.pruneFrequency,
 		InitFrequency:    cfg.initFrequency,
 		ResyncFrequency:  cfg.resyncFrequency,
