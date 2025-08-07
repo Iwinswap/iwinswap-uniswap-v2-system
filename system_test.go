@@ -87,6 +87,21 @@ func (p *mockPersistence) RegisterPool(t0, t1, poolAddr common.Address) (uint64,
 	return id, nil
 }
 
+// RegisterPools provides a mock batch registration implementation.
+func (p *mockPersistence) RegisterPools(t0s, t1s, poolAddrs []common.Address) ([]uint64, []error) {
+	if len(t0s) != len(t1s) || len(t0s) != len(poolAddrs) {
+		panic("mismatched lengths in mock RegisterPools")
+	}
+	ids := make([]uint64, len(poolAddrs))
+	errs := make([]error, len(poolAddrs))
+	for i, addr := range poolAddrs {
+		id, err := p.RegisterPool(t0s[i], t1s[i], addr)
+		ids[i] = id
+		errs[i] = err
+	}
+	return ids, errs
+}
+
 // --- Test Setup Helper ---
 
 type systemTestConfig struct {
@@ -213,6 +228,7 @@ func testSetupSystem(t *testing.T, cfg *systemTestConfig) *testSystem {
 		PoolAddressToID:  ts.Persistence.PoolAddressToID,
 		PoolIDToAddress:  ts.Persistence.PoolIDToAddress,
 		RegisterPool:     ts.Persistence.RegisterPool,
+		RegisterPools:    ts.Persistence.RegisterPools,
 		ErrorHandler:     errorHandler,
 		TestBloom:        testBloomFunc,
 		PruneFrequency:   cfg.pruneFrequency,
@@ -240,6 +256,7 @@ func testNewBlock(number uint64) *types.Block {
 func TestUniswapV2System(t *testing.T) {
 	addr1 := common.HexToAddress("0x1")
 	addr2 := common.HexToAddress("0x2")
+	addr3 := common.HexToAddress("0x3")
 
 	// Previous tests are maintained...
 	t.Run("HappyPathInitialization", func(t *testing.T) {
@@ -481,6 +498,47 @@ func TestUniswapV2System(t *testing.T) {
 		require.Error(t, err, "deleting a non-existent pool ID should return an error")
 
 		// 5. Final check for unexpected background errors.
+		assert.Empty(t, ts.GetErrors())
+	})
+
+	t.Run("DeletePools_RemovesMultiplePools", func(t *testing.T) {
+		// 1. Setup: Discover and initialize three pools.
+		cfg := &systemTestConfig{
+			initFrequency: 10 * time.Millisecond,
+			discoverPools: func(logs []types.Log) ([]common.Address, error) {
+				return []common.Address{addr1, addr2, addr3}, nil
+			},
+		}
+		ts := testSetupSystem(t, cfg)
+		defer ts.cancel()
+
+		ts.BlockEventer <- testNewBlock(1)
+		require.Eventually(t, func() bool {
+			return len(ts.System.View()) == 3
+		}, time.Second, 5*time.Millisecond, "all three pools should be initialized")
+
+		poolID1, _ := ts.Persistence.PoolAddressToID(addr1)
+		poolID2, _ := ts.Persistence.PoolAddressToID(addr2)
+		poolID3, _ := ts.Persistence.PoolAddressToID(addr3)
+
+		// 2. Execute a successful batch deletion.
+		errs := ts.System.DeletePools([]uint64{poolID1, poolID3})
+		require.Nil(t, errs, "successful batch deletion should return a nil error slice")
+
+		// 3. Verify the state after deletion.
+		view := ts.System.View()
+		require.Len(t, view, 1, "view should contain exactly one pool after deletion")
+		assert.Equal(t, poolID2, view[0].ID, "the remaining pool should be poolID2")
+
+		// 4. Test partial failure.
+		errs = ts.System.DeletePools([]uint64{poolID2, 9999})
+		require.NotNil(t, errs, "partial failure should return a non-nil error slice")
+		require.Len(t, errs, 2)
+		assert.Nil(t, errs[0], "deleting poolID2 should succeed")
+		assert.NotNil(t, errs[1], "deleting non-existent pool 9999 should fail")
+
+		// 5. Verify final state.
+		require.Empty(t, ts.System.View(), "view should be empty after all valid pools are deleted")
 		assert.Empty(t, ts.GetErrors())
 	})
 }

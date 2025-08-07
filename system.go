@@ -40,6 +40,8 @@ type GetReservesFunc func(ctx context.Context, poolAddrs []common.Address, clien
 type AddressToIDFunc func(common.Address) (uint64, error)
 type IDToAddressFunc func(uint64) (common.Address, error)
 type RegisterPoolFunc func(token0, token1, poolAddr common.Address) (poolID uint64, err error)
+type RegisterPoolsFunc func(token0s, token1s, poolAddrs []common.Address) (poolIDS []uint64, error []error)
+
 type ErrorHandlerFunc func(err error)
 type TestBloomFunc func(types.Bloom) bool
 
@@ -59,6 +61,7 @@ type Config struct {
 	PoolAddressToID  AddressToIDFunc
 	PoolIDToAddress  IDToAddressFunc
 	RegisterPool     RegisterPoolFunc
+	RegisterPools    RegisterPoolsFunc
 	ErrorHandler     ErrorHandlerFunc
 	TestBloom        TestBloomFunc
 	PruneFrequency   time.Duration
@@ -105,6 +108,9 @@ func (c *Config) validate() error {
 	if c.RegisterPool == nil {
 		return errors.New("register pool function is required")
 	}
+	if c.RegisterPools == nil {
+		return errors.New("register pools function is required")
+	}
 	if c.ErrorHandler == nil {
 		return errors.New("error handler function is required")
 	}
@@ -129,6 +135,7 @@ type UniswapV2System struct {
 	tokenAddressToID   AddressToIDFunc
 	poolAddressToID    AddressToIDFunc
 	registerPool       RegisterPoolFunc
+	registerPools      RegisterPoolsFunc
 	poolIDToAddress    IDToAddressFunc
 	cachedView         atomic.Pointer[[]PoolView]
 	lastUpdatedAtBlock atomic.Uint64
@@ -171,6 +178,7 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 		poolAddressToID:  cfg.PoolAddressToID,
 		poolIDToAddress:  cfg.PoolIDToAddress,
 		registerPool:     cfg.RegisterPool,
+		registerPools:    cfg.RegisterPools,
 		errorHandler: func(err error) {
 			errorType := determineErrorType(err)
 			cfg.Logger.Error("UniswapV2System internal error", "system", cfg.SystemName, "type", errorType, "error", err)
@@ -537,10 +545,19 @@ func (s *UniswapV2System) applyInitializations(
 	initReserve0s, initReserve1s []*big.Int,
 	initErrs []error,
 ) []error {
-	var capturedErrors []error
 	if len(unknownPools) == 0 {
 		return nil
 	}
+
+	var capturedErrors []error
+
+	// Filter out pools that failed the initial RPC call and prepare data for the valid ones.
+	var validPools, validT0s, validT1s []common.Address
+	var validTypes []uint8
+	var validFees []uint16
+	var validR0s, validR1s []*big.Int
+	// Map from the index in the 'valid' slices back to the original index in 'unknownPools'.
+	originalIndices := make(map[int]int)
 
 	for i, poolAddr := range unknownPools {
 		if initErrs[i] != nil {
@@ -550,49 +567,66 @@ func (s *UniswapV2System) applyInitializations(
 			})
 			continue
 		}
+		originalIndices[len(validPools)] = i
+		validPools = append(validPools, poolAddr)
+		validT0s = append(validT0s, initToken0s[i])
+		validT1s = append(validT1s, initToken1s[i])
+		validTypes = append(validTypes, initPoolTypes[i])
+		validFees = append(validFees, initFeeBps[i])
+		validR0s = append(validR0s, initReserve0s[i])
+		validR1s = append(validR1s, initReserve1s[i])
+	}
 
-		_, err := s.registerPool(initToken0s[i], initToken1s[i], poolAddr)
-		if err != nil {
+	if len(validPools) == 0 {
+		return capturedErrors
+	}
+
+	// Step 1: Register all valid pools in a single batch operation.
+	newPoolIDs, regErrs := s.registerPools(validT0s, validT1s, validPools)
+
+	// Keep track of which pools failed registration so we don't try to add them locally.
+	failedRegistration := make(map[int]bool)
+
+	for i, regErr := range regErrs {
+		if regErr != nil {
+			poolAddr := validPools[i]
 			capturedErrors = append(capturedErrors, &RegistrationError{
 				InitializationError: InitializationError{
-					SystemError: SystemError{BlockNumber: blockNumber, Err: err},
+					SystemError: SystemError{BlockNumber: blockNumber, Err: regErr},
 					PoolAddress: poolAddr,
 				},
-				Token0Address: initToken0s[i],
-				Token1Address: initToken1s[i],
+				Token0Address: validT0s[i],
+				Token1Address: validT1s[i],
 			})
+			failedRegistration[i] = true
+		}
+	}
+
+	// Step 2: Now, iterate through the valid pools again and add the ones that were successfully registered.
+	for i, poolAddr := range validPools {
+		if failedRegistration[i] {
 			continue
 		}
 
-		err = addPool(initToken0s[i], initToken1s[i], poolAddr, initPoolTypes[i], initFeeBps[i], s.tokenAddressToID, s.poolAddressToID, s.registry)
-		if err != nil {
-			capturedErrors = append(capturedErrors, &InitializationError{
-				SystemError: SystemError{BlockNumber: blockNumber, Err: err},
-				PoolAddress: poolAddr,
-			})
+		poolID := newPoolIDs[i]
+		if err := addPool(validT0s[i], validT1s[i], poolAddr, validTypes[i], validFees[i], s.tokenAddressToID, s.poolAddressToID, s.registry); err != nil {
+			capturedErrors = append(capturedErrors, &InitializationError{SystemError: SystemError{BlockNumber: blockNumber, Err: err}, PoolAddress: poolAddr})
 			continue
 		}
 
-		poolID, err := s.poolAddressToID(poolAddr)
-		if err != nil {
-			capturedErrors = append(capturedErrors, &DataConsistencyError{
-				SystemError: SystemError{BlockNumber: blockNumber, Err: err},
-				PoolAddress: poolAddr,
-				Details:     "failed to get ID for newly added pool",
-			})
-			continue
-		}
-		if err := updatePool(initReserve0s[i], initReserve1s[i], poolID, s.registry); err != nil {
+		if err := updatePool(validR0s[i], validR1s[i], poolID, s.registry); err != nil {
 			capturedErrors = append(capturedErrors, &InitializationError{
-				SystemError: SystemError{
-					BlockNumber: blockNumber,
-					Err:         fmt.Errorf("failed to set initial reserves: %w", err),
-				},
+				SystemError: SystemError{BlockNumber: blockNumber, Err: fmt.Errorf("failed to set initial reserves: %w", err)},
 				PoolAddress: poolAddr,
 			})
 		}
 	}
-	return capturedErrors
+
+	if len(capturedErrors) > 0 {
+		return capturedErrors
+	}
+
+	return nil
 }
 
 // startPruner is a background process that periodically removes blocked pools from the registry.
@@ -619,12 +653,11 @@ func (s *UniswapV2System) pruneBlockedPools() {
 		return
 	}
 
-	var capturedErrors []error
 	var poolsToDelete []uint64
 	for _, poolView := range currentView {
 		poolAddr, err := s.poolIDToAddress(poolView.ID)
 		if err != nil {
-			capturedErrors = append(capturedErrors, &PrunerError{PoolID: poolView.ID, Err: fmt.Errorf("could not get address: %w", err)})
+			s.errorHandler(&PrunerError{PoolID: poolView.ID, Err: fmt.Errorf("could not get address: %w", err)})
 			continue
 		}
 		if s.inBlockedList(poolAddr) {
@@ -633,19 +666,13 @@ func (s *UniswapV2System) pruneBlockedPools() {
 	}
 
 	if len(poolsToDelete) > 0 {
-		s.mu.Lock()
 		s.logger.Info("Pruner removing blocked pools", "count", len(poolsToDelete))
-		for _, poolID := range poolsToDelete {
-			if err := deletePool(poolID, s.registry); err != nil {
-				capturedErrors = append(capturedErrors, &PrunerError{PoolID: poolID, Err: fmt.Errorf("failed to delete from registry: %w", err)})
+		errs := s.DeletePools(poolsToDelete)
+		for i, err := range errs {
+			if err != nil {
+				s.errorHandler(&PrunerError{PoolID: poolsToDelete[i], Err: fmt.Errorf("failed to delete from registry: %w", err)})
 			}
 		}
-		s.updateCachedView()
-		s.mu.Unlock()
-	}
-
-	for _, err := range capturedErrors {
-		s.errorHandler(err)
 	}
 }
 
@@ -668,5 +695,44 @@ func (s *UniswapV2System) DeletePool(poolID uint64) error {
 
 	// After any modification to the registry, the cached view must be updated.
 	s.updateCachedView()
+	return nil
+}
+
+// DeletePools removes multiple pools from the UniswapV2System's internal registry.
+//
+// @note This is a low-level method that must be called hierarchically,
+// typically from a central registry manager that can orchestrate the deletion
+// across all necessary application subsystems.
+//
+// ⚠️ WARNING: Calling this function in isolation WILL lead to state
+// inconsistency, as it does not affect dependent components. For a safe, application-wide deletion, use the
+// appropriate manager-level method.
+func (s *UniswapV2System) DeletePools(poolIDs []uint64) []error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	errs := make([]error, len(poolIDs))
+	hasChanged := false
+	hasErrors := false
+
+	for i, poolID := range poolIDs {
+		err := deletePool(poolID, s.registry)
+		if err != nil {
+			errs[i] = err
+			hasErrors = true
+		} else {
+			hasChanged = true
+		}
+	}
+
+	if hasChanged {
+		// After any modification to the registry, the cached view must be updated.
+		s.updateCachedView()
+	}
+
+	if hasErrors {
+		return errs
+	}
+
 	return nil
 }
