@@ -270,7 +270,12 @@ func (s *UniswapV2System) handleNewBlock(ctx context.Context, b *types.Block) er
 	if err != nil {
 		return fmt.Errorf("block %d: failed to get eth client: %w", blockNum, err)
 	}
+
+	// Start timer for the FilterLogs RPC call
+	filterStart := time.Now()
 	logs, err := client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: b.Number(), ToBlock: b.Number()})
+	s.logger.Info("FilterLogs RPC call completed", "blockNumber", blockNum, "duration", time.Since(filterStart))
+
 	if err != nil {
 		return fmt.Errorf("block %d: failed to filter logs: %w", blockNum, err)
 	}
