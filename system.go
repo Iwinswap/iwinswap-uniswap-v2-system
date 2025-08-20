@@ -18,6 +18,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// High-frequency polling: try every 50ms for a total of 500ms.
+var (
+	defaultLogMaxRetries = 10
+	defaultLogRetryDelay = 50 * time.Millisecond
+)
+
 // Logger defines a standard interface for structured, leveled logging,
 // compatible with the standard library's slog.
 type Logger interface {
@@ -64,7 +70,7 @@ type Config struct {
 	RegisterPools    RegisterPoolsFunc
 	ErrorHandler     ErrorHandlerFunc
 	TestBloom        TestBloomFunc
-	FilterTopics     [][]common.Hash // Optional: Injected topics for log filtering for performance.
+	FilterTopics     [][]common.Hash
 	PruneFrequency   time.Duration
 	InitFrequency    time.Duration
 	ResyncFrequency  time.Duration
@@ -264,6 +270,47 @@ func (s *UniswapV2System) listenBlockEventer(ctx context.Context) {
 	}
 }
 
+// getLogsWithRetry attempts to fetch logs for a specific block, using a
+// high-frequency polling strategy to account for potential node indexing delays.
+//
+// This function is called only after a block's bloom filter has passed our
+// test, meaning we expect relevant logs to be present. If the initial query
+// returns an empty slice, it retries up to `defaultLogMaxRetries` times
+// before concluding the block has no relevant logs.
+func (s *UniswapV2System) getLogsWithRetry(ctx context.Context, client ethclients.ETHClient, block *types.Block) ([]types.Log, error) {
+	blockHash := block.Hash()
+	query := ethereum.FilterQuery{
+		FromBlock: block.Number(),
+		ToBlock:   block.Number(),
+		Topics:    s.filterTopics,
+	}
+
+	for attempt := 0; attempt < defaultLogMaxRetries; attempt++ {
+		logs, err := client.FilterLogs(ctx, query)
+		if err != nil {
+			return nil, err // For genuine RPC errors, fail immediately.
+		}
+
+		// If logs are found, we have succeeded.
+		if len(logs) > 0 {
+			return logs, nil
+		}
+
+		// If logs are empty, it might be a race condition. Wait and retry.
+		select {
+		case <-time.After(defaultLogRetryDelay):
+			s.logger.Debug("Retrying log fetch for block", "block", block.NumberU64(), "attempt", attempt+1)
+			continue
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// If all retries are exhausted, assume no relevant logs exist.
+	s.logger.Warn("No relevant logs found for block after all retries", "block", block.NumberU64(), "hash", blockHash.Hex())
+	return []types.Log{}, nil // Return an empty slice, not an error.
+}
+
 // handleNewBlock processes a single block, performs fast synchronous updates,
 // and queues slow pool initializations for asynchronous processing.
 func (s *UniswapV2System) handleNewBlock(ctx context.Context, b *types.Block) error {
@@ -280,15 +327,8 @@ func (s *UniswapV2System) handleNewBlock(ctx context.Context, b *types.Block) er
 
 	// Start timer for the FilterLogs RPC call
 	filterStart := time.Now()
-	logs, err := client.FilterLogs(
-		ctx,
-		ethereum.FilterQuery{
-			FromBlock: b.Number(),
-			ToBlock:   b.Number(),
-			Topics:    s.filterTopics,
-		})
+	logs, err := s.getLogsWithRetry(ctx, client, b)
 	s.logger.Info("FilterLogs RPC call completed", "blockNumber", blockNum, "duration", time.Since(filterStart))
-
 	if err != nil {
 		return fmt.Errorf("block %d: failed to filter logs: %w", blockNum, err)
 	}
