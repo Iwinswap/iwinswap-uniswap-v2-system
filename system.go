@@ -483,6 +483,9 @@ func (s *UniswapV2System) startStateReconciler(ctx context.Context) {
 // runStateReconciliation performs a single cycle of fetching on-chain reserves for all known
 // pools and updating the local state if any discrepancies are found.
 func (s *UniswapV2System) runStateReconciliation(ctx context.Context) {
+	timer := prometheus.NewTimer(s.metrics.ReconciliationDuration.WithLabelValues(s.systemName))
+	defer timer.ObserveDuration()
+
 	prevView := s.View()
 	if len(prevView) == 0 {
 		return
@@ -706,6 +709,10 @@ func (s *UniswapV2System) startPruner(ctx context.Context) {
 
 // pruneBlockedPools scans the registry for pools that should no longer be tracked and removes them.
 func (s *UniswapV2System) pruneBlockedPools() {
+	s.logger.Info("Starting pruner run to check for blocked or orphaned pools")
+	timer := prometheus.NewTimer(s.metrics.PruningDuration.WithLabelValues(s.systemName))
+	defer timer.ObserveDuration()
+
 	currentView := s.View()
 	if len(currentView) == 0 {
 		return

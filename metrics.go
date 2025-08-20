@@ -15,13 +15,16 @@ type Metrics struct {
 	ErrorsTotal        *prometheus.CounterVec
 
 	// --- Tier 2: Performance & Bottleneck Identification ---
-	PendingInitQueueSize *prometheus.GaugeVec
-	BlockProcessingDur   *prometheus.HistogramVec
-	PoolInitDur          *prometheus.HistogramVec
+	PendingInitQueueSize   *prometheus.GaugeVec
+	BlockProcessingDur     *prometheus.HistogramVec
+	PoolInitDur            *prometheus.HistogramVec
+	ReconciliationDuration *prometheus.HistogramVec
+	PruningDuration        *prometheus.HistogramVec
 
 	// --- Tier 3: Data & State Integrity ---
 	PoolsInRegistry  *prometheus.GaugeVec
 	PoolsInitialized *prometheus.CounterVec
+	PoolsPruned      *prometheus.CounterVec
 }
 
 // NewMetrics creates and registers all the Prometheus metrics for the system.
@@ -54,6 +57,16 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		PoolInitDur: promauto.With(reg).NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "uniswap_system_pool_initialization_duration_seconds",
 			Help:    "A histogram of the time it takes for a batch of pending pools to be initialized.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"system_name"}),
+		ReconciliationDuration: promauto.With(reg).NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "uniswap_system_reconciliation_duration_seconds",
+			Help:    "A histogram of the time it takes for the state reconciler to run a full cycle.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"system_name"}),
+		PruningDuration: promauto.With(reg).NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "uniswap_system_pruning_duration_seconds",
+			Help:    "A histogram of the time it takes for the pruner to run a full cycle.",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"system_name"}),
 
