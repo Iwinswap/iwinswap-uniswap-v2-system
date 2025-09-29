@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -74,6 +72,8 @@ type Config struct {
 	PruneFrequency   time.Duration
 	InitFrequency    time.Duration
 	ResyncFrequency  time.Duration
+	LogMaxRetries    int
+	LogRetryDelay    time.Duration
 	Logger           Logger
 }
 
@@ -157,6 +157,8 @@ type UniswapV2System struct {
 	initFrequency      time.Duration
 	resyncFrequency    time.Duration
 	pendingInit        map[common.Address]struct{}
+	logMaxRetries      int
+	logRetryDelay      time.Duration
 	mu                 sync.RWMutex
 	registry           *UniswapV2Registry
 	metrics            *Metrics
@@ -170,9 +172,13 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 		return nil, fmt.Errorf("invalid uniswapv2 system configuration: %w", err)
 	}
 
-	if cfg.Logger == nil {
-		// default to a silent logger.
-		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	logMaxRetries := cfg.LogMaxRetries
+	if logMaxRetries <= 0 {
+		logMaxRetries = defaultLogMaxRetries
+	}
+	logRetryDelay := cfg.LogRetryDelay
+	if logRetryDelay <= 0 {
+		logRetryDelay = defaultLogRetryDelay
 	}
 
 	metrics := NewMetrics(cfg.PrometheusReg)
@@ -207,6 +213,8 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 		registry:           NewUniswapV2Registry(),
 		pendingInit:        make(map[common.Address]struct{}),
 		lastUpdatedAtBlock: atomic.Uint64{},
+		logMaxRetries:      logMaxRetries,
+		logRetryDelay:      logRetryDelay,
 		metrics:            metrics,
 		logger:             cfg.Logger,
 	}
@@ -285,7 +293,7 @@ func (s *UniswapV2System) getLogsWithRetry(ctx context.Context, client ethclient
 		Topics:    s.filterTopics,
 	}
 
-	for attempt := 0; attempt < defaultLogMaxRetries; attempt++ {
+	for attempt := 0; attempt < s.logMaxRetries; attempt++ {
 		logs, err := client.FilterLogs(ctx, query)
 		if err != nil {
 			return nil, err // For genuine RPC errors, fail immediately.
@@ -298,7 +306,7 @@ func (s *UniswapV2System) getLogsWithRetry(ctx context.Context, client ethclient
 
 		// If logs are empty, it might be a race condition. Wait and retry.
 		select {
-		case <-time.After(defaultLogRetryDelay):
+		case <-time.After(s.logRetryDelay):
 			s.logger.Debug("Retrying log fetch for block", "block", block.NumberU64(), "attempt", attempt+1)
 			continue
 		case <-ctx.Done():

@@ -3,6 +3,8 @@ package uniswapv2
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -235,6 +237,7 @@ func testSetupSystem(t *testing.T, cfg *systemTestConfig) *testSystem {
 		PruneFrequency:   cfg.pruneFrequency,
 		InitFrequency:    cfg.initFrequency,
 		ResyncFrequency:  cfg.resyncFrequency,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	// Call the constructor with the new config object.
