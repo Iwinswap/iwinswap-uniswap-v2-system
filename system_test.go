@@ -237,6 +237,8 @@ func testSetupSystem(t *testing.T, cfg *systemTestConfig) *testSystem {
 		PruneFrequency:   cfg.pruneFrequency,
 		InitFrequency:    cfg.initFrequency,
 		ResyncFrequency:  cfg.resyncFrequency,
+		LogMaxRetries:    0,
+		LogRetryDelay:    0,
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -545,4 +547,6 @@ func TestUniswapV2System(t *testing.T) {
 		require.Empty(t, ts.System.View(), "view should be empty after all valid pools are deleted")
 		assert.Empty(t, ts.GetErrors())
 	})
+
+	// @todo add test for getLogsWithRetry to ensure retries are made if config.LogMaxRetries > 0
 }

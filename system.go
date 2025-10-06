@@ -16,12 +16,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// High-frequency polling: try every 50ms for a total of 500ms.
-var (
-	defaultLogMaxRetries = 10
-	defaultLogRetryDelay = 50 * time.Millisecond
-)
-
 // Logger defines a standard interface for structured, leveled logging,
 // compatible with the standard library's slog.
 type Logger interface {
@@ -172,15 +166,6 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 		return nil, fmt.Errorf("invalid uniswapv2 system configuration: %w", err)
 	}
 
-	logMaxRetries := cfg.LogMaxRetries
-	if logMaxRetries <= 0 {
-		logMaxRetries = defaultLogMaxRetries
-	}
-	logRetryDelay := cfg.LogRetryDelay
-	if logRetryDelay <= 0 {
-		logRetryDelay = defaultLogRetryDelay
-	}
-
 	metrics := NewMetrics(cfg.PrometheusReg)
 
 	system := &UniswapV2System{
@@ -213,8 +198,8 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 		registry:           NewUniswapV2Registry(),
 		pendingInit:        make(map[common.Address]struct{}),
 		lastUpdatedAtBlock: atomic.Uint64{},
-		logMaxRetries:      logMaxRetries,
-		logRetryDelay:      logRetryDelay,
+		logMaxRetries:      cfg.LogMaxRetries,
+		logRetryDelay:      cfg.LogRetryDelay,
 		metrics:            metrics,
 		logger:             cfg.Logger,
 	}
@@ -283,7 +268,7 @@ func (s *UniswapV2System) listenBlockEventer(ctx context.Context) {
 //
 // This function is called only after a block's bloom filter has passed our
 // test, meaning we expect relevant logs to be present. If the initial query
-// returns an empty slice, it retries up to `defaultLogMaxRetries` times
+// returns an empty slice, it retries up to `s.logMaxRetries` times
 // before concluding the block has no relevant logs.
 func (s *UniswapV2System) getLogsWithRetry(ctx context.Context, client ethclients.ETHClient, block *types.Block) ([]types.Log, error) {
 	blockHash := block.Hash()
@@ -293,7 +278,12 @@ func (s *UniswapV2System) getLogsWithRetry(ctx context.Context, client ethclient
 		Topics:    s.filterTopics,
 	}
 
-	for attempt := 0; attempt < s.logMaxRetries; attempt++ {
+	// maxAttempts is 1 + the s.logMaxRetries value
+	// we will try to fetch logs at least 1.
+	maxAttempts := 1 + s.logMaxRetries
+	for i := range maxAttempts {
+
+		attempt := i + 1
 		logs, err := client.FilterLogs(ctx, query)
 		if err != nil {
 			return nil, err // For genuine RPC errors, fail immediately.
@@ -304,13 +294,17 @@ func (s *UniswapV2System) getLogsWithRetry(ctx context.Context, client ethclient
 			return logs, nil
 		}
 
-		// If logs are empty, it might be a race condition. Wait and retry.
-		select {
-		case <-time.After(s.logRetryDelay):
-			s.logger.Debug("Retrying log fetch for block", "block", block.NumberU64(), "attempt", attempt+1)
-			continue
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		// If logs are empty, it might be a race condition (node might still be processing the block)
+		// we can retry if attempt < maxAttempts
+
+		if attempt < maxAttempts {
+			select {
+			case <-time.After(s.logRetryDelay):
+				s.logger.Debug("Retrying log fetch for block", "block", block.NumberU64(), "attempt", attempt)
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
 	}
 
