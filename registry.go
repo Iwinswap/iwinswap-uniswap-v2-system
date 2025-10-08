@@ -35,13 +35,13 @@ func (e *DependencyError) Unwrap() error {
 }
 
 type PoolView struct {
-	ID       uint64
-	Token0   uint64
-	Token1   uint64
-	Reserve0 *big.Int
-	Reserve1 *big.Int
-	Type     uint8
-	FeeBps   uint16 // i.e 30 for 0.3%
+	ID       uint64   `json:"id"`
+	Token0   uint64   `json:"token0"`
+	Token1   uint64   `json:"token1"`
+	Reserve0 *big.Int `json:"reserve0"`
+	Reserve1 *big.Int `json:"reserve1"`
+	Type     uint8    `json:"type"`
+	FeeBps   uint16   `json:"feeBps"` // i.e 30 for 0.3%
 }
 
 // UniswapV2Registry manages a large number of v2 pools using a data-oriented design.
