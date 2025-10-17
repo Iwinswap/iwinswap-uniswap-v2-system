@@ -166,7 +166,7 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 		return nil, fmt.Errorf("invalid uniswapv2 system configuration: %w", err)
 	}
 
-	metrics := NewMetrics(cfg.PrometheusReg)
+	metrics := NewMetrics(cfg.PrometheusReg, cfg.SystemName)
 
 	system := &UniswapV2System{
 		systemName:       cfg.SystemName,
@@ -185,7 +185,7 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 		errorHandler: func(err error) {
 			errorType := determineErrorType(err)
 			cfg.Logger.Error("UniswapV2System internal error", "system", cfg.SystemName, "type", errorType, "error", err)
-			metrics.ErrorsTotal.WithLabelValues(cfg.SystemName, errorType).Inc()
+			metrics.ErrorsTotal.WithLabelValues(errorType).Inc()
 
 			// 3. Call the user's external handler.
 			cfg.ErrorHandler(err)
@@ -236,7 +236,7 @@ func (s *UniswapV2System) LastUpdatedAtBlock() uint64 {
 func (s *UniswapV2System) updateCachedView() {
 	newView := viewRegistry(s.registry)
 	s.cachedView.Store(&newView)
-	s.metrics.PoolsInRegistry.WithLabelValues(s.systemName).Set(float64(len(newView)))
+	s.metrics.PoolsInRegistry.WithLabelValues().Set(float64(len(newView)))
 }
 
 // listenBlockEventer is the main event loop for the system.
@@ -244,11 +244,11 @@ func (s *UniswapV2System) listenBlockEventer(ctx context.Context) {
 	for {
 		select {
 		case b := <-s.newBlockEventer:
-			timer := prometheus.NewTimer(s.metrics.BlockProcessingDur.WithLabelValues(s.systemName))
+			timer := prometheus.NewTimer(s.metrics.BlockProcessingDur.WithLabelValues())
 
 			if !s.testBloom(b.Bloom()) {
 				s.lastUpdatedAtBlock.Store(b.NumberU64())
-				s.metrics.LastProcessedBlock.WithLabelValues(s.systemName).Set(float64(b.NumberU64()))
+				s.metrics.LastProcessedBlock.WithLabelValues().Set(float64(b.NumberU64()))
 				timer.ObserveDuration()
 				continue
 			}
@@ -378,9 +378,9 @@ func (s *UniswapV2System) handleNewBlock(ctx context.Context, b *types.Block) er
 		s.updateCachedView()
 	}()
 
-	s.metrics.LastProcessedBlock.WithLabelValues(s.systemName).Set(float64(blockNum))
+	s.metrics.LastProcessedBlock.WithLabelValues().Set(float64(blockNum))
 	if newPendingCount > 0 {
-		s.metrics.PendingInitQueueSize.WithLabelValues(s.systemName).Add(float64(newPendingCount))
+		s.metrics.PendingInitQueueSize.WithLabelValues().Add(float64(newPendingCount))
 	}
 	for _, e := range capturedErrors {
 		s.errorHandler(e)
@@ -407,7 +407,7 @@ func (s *UniswapV2System) startInitializer(ctx context.Context) {
 
 // runPendingInitializations drains the pending queue and processes the new pools in a batch.
 func (s *UniswapV2System) runPendingInitializations(ctx context.Context) {
-	timer := prometheus.NewTimer(s.metrics.PoolInitDur.WithLabelValues(s.systemName))
+	timer := prometheus.NewTimer(s.metrics.PoolInitDur.WithLabelValues())
 	defer timer.ObserveDuration()
 
 	var poolsToInit []common.Address
@@ -423,7 +423,7 @@ func (s *UniswapV2System) runPendingInitializations(ctx context.Context) {
 		}
 	}()
 
-	s.metrics.PendingInitQueueSize.WithLabelValues(s.systemName).Set(0)
+	s.metrics.PendingInitQueueSize.WithLabelValues().Set(0)
 	if len(poolsToInit) == 0 {
 		return
 	}
@@ -457,7 +457,7 @@ func (s *UniswapV2System) runPendingInitializations(ctx context.Context) {
 			"count", successfulInits,
 			"failed", len(initErrors),
 		)
-		s.metrics.PoolsInitialized.WithLabelValues(s.systemName).Add(float64(successfulInits))
+		s.metrics.PoolsInitialized.WithLabelValues().Add(float64(successfulInits))
 	}
 	for _, e := range initErrors {
 		s.errorHandler(e)
@@ -485,7 +485,7 @@ func (s *UniswapV2System) startStateReconciler(ctx context.Context) {
 // runStateReconciliation performs a single cycle of fetching on-chain reserves for all known
 // pools and updating the local state if any discrepancies are found.
 func (s *UniswapV2System) runStateReconciliation(ctx context.Context) {
-	timer := prometheus.NewTimer(s.metrics.ReconciliationDuration.WithLabelValues(s.systemName))
+	timer := prometheus.NewTimer(s.metrics.ReconciliationDuration.WithLabelValues())
 	defer timer.ObserveDuration()
 
 	prevView := s.View()
@@ -712,7 +712,7 @@ func (s *UniswapV2System) startPruner(ctx context.Context) {
 // pruneBlockedPools scans the registry for pools that should no longer be tracked and removes them.
 func (s *UniswapV2System) pruneBlockedPools() {
 	s.logger.Info("Starting pruner run to check for blocked or orphaned pools")
-	timer := prometheus.NewTimer(s.metrics.PruningDuration.WithLabelValues(s.systemName))
+	timer := prometheus.NewTimer(s.metrics.PruningDuration.WithLabelValues())
 	defer timer.ObserveDuration()
 
 	currentView := s.View()
