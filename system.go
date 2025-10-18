@@ -586,6 +586,11 @@ func (s *UniswapV2System) applyUpdates(blockNumber uint64, updatedPoolAddrs []co
 		if err != nil {
 			continue // Pool not in registry, possibly pruned or pending initialization.
 		}
+
+		if !hasPool(poolID, s.registry) {
+			continue // ensure pool belongs to this system
+		}
+
 		if err = updatePool(updatedReserve0s[i], updatedReserve1s[i], poolID, s.registry); err != nil {
 			capturedErrors = append(capturedErrors, &UpdateError{
 				SystemError: SystemError{BlockNumber: blockNumber, Err: err},
