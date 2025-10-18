@@ -221,4 +221,26 @@ func TestUniswapV2Registry(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 0, originalView.Reserve0.Cmp(big.NewInt(1000)), "registry data should not be mutated by consumers of the view")
 	})
+
+	t.Run("HasPool", func(t *testing.T) {
+		registry := NewUniswapV2Registry()
+		idProvider := newMockIDProvider()
+		idProvider.RegisterToken(tokenAddr1)
+		idProvider.RegisterToken(tokenAddr2)
+		poolID := idProvider.RegisterPool(poolAddr12)
+		require.NoError(t, addPool(tokenAddr1, tokenAddr2, poolAddr12, 0, 30, idProvider.TokenAddressToID, idProvider.PoolAddressToID, registry))
+
+		// Check for an existing pool
+		assert.True(t, hasPool(poolID, registry), "hasPool should return true for an existing pool")
+
+		// Check for a non-existent pool
+		assert.False(t, hasPool(999, registry), "hasPool should return false for a non-existent pool")
+
+		// Delete the pool
+		err := deletePool(poolID, registry)
+		require.NoError(t, err)
+
+		// Check for the deleted pool
+		assert.False(t, hasPool(poolID, registry), "hasPool should return false for a deleted pool")
+	})
 }

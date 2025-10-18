@@ -216,3 +216,11 @@ func getPoolById(
 
 	return view, nil
 }
+
+func hasPool(
+	poolID uint64,
+	registry *UniswapV2Registry,
+) bool {
+	_, ok := registry.idToIndex[poolID]
+	return ok
+}
