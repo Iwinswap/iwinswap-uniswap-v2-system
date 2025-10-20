@@ -64,6 +64,50 @@ func NewUniswapV2Registry() *UniswapV2Registry {
 	}
 }
 
+// NewUniswapV2RegistryFromViews reconstructs a UniswapV2Registry from a slice of PoolView structs.
+// This is the primary mechanism for restoring the registry's state from a snapshot.
+// It is highly optimized, pre-allocating all necessary memory and performing deep copies
+// of mutable data like big.Int reserves to ensure data integrity.
+func NewUniswapV2RegistryFromViews(views []PoolView) *UniswapV2Registry {
+	if len(views) == 0 {
+		return NewUniswapV2Registry()
+	}
+
+	numPools := len(views)
+
+	// Pre-allocate all slices and maps to the final required size for performance.
+	registry := &UniswapV2Registry{
+		id:        make([]uint64, numPools),
+		token0:    make([]uint64, numPools),
+		token1:    make([]uint64, numPools),
+		reserve0:  make([]*big.Int, numPools),
+		reserve1:  make([]*big.Int, numPools),
+		pooltype:  make([]uint8, numPools),
+		fee:       make([]uint16, numPools),
+		idToIndex: make(map[uint64]int, numPools),
+	}
+
+	for i, view := range views {
+		// Populate the physical data slices.
+		registry.id[i] = view.ID
+		registry.token0[i] = view.Token0
+		registry.token1[i] = view.Token1
+		registry.pooltype[i] = view.Type
+		registry.fee[i] = view.FeeBps
+
+		// CRITICAL: Perform a deep copy of the big.Int reserves. This prevents
+		// external modifications to the input view from affecting the new
+		// registry's internal state, ensuring data encapsulation and safety.
+		registry.reserve0[i] = new(big.Int).Set(view.Reserve0)
+		registry.reserve1[i] = new(big.Int).Set(view.Reserve1)
+
+		// Rebuild the lookup map.
+		registry.idToIndex[view.ID] = i
+	}
+
+	return registry
+}
+
 func addPool(
 	token0, token1,
 	pool common.Address,

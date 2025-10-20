@@ -244,3 +244,61 @@ func TestUniswapV2Registry(t *testing.T) {
 		assert.False(t, hasPool(poolID, registry), "hasPool should return false for a deleted pool")
 	})
 }
+
+func TestNewUniswapV2RegistryFromViews(t *testing.T) {
+	t.Parallel()
+
+	t.Run("SuccessWithValidView", func(t *testing.T) {
+		// 1. Arrange: Create a valid view.
+		sourceView := []PoolView{
+			{ID: 10, Token0: 1, Token1: 2, Reserve0: big.NewInt(1000), Reserve1: big.NewInt(2000), Type: 1, FeeBps: 30},
+			{ID: 20, Token0: 1, Token1: 3, Reserve0: big.NewInt(3000), Reserve1: big.NewInt(4000), Type: 2, FeeBps: 5},
+		}
+
+		// 2. Act: Create the registry from the view.
+		registry := NewUniswapV2RegistryFromViews(sourceView)
+		require.NotNil(t, registry)
+
+		// 3. Assert: Verify the registry's state.
+		rehydratedView := viewRegistry(registry)
+		require.Len(t, rehydratedView, 2)
+		assert.ElementsMatch(t, sourceView, rehydratedView, "Rehydrated view should match the source view")
+
+		// Also check the internal lookup map.
+		assert.Equal(t, 0, registry.idToIndex[10])
+		assert.Equal(t, 1, registry.idToIndex[20])
+	})
+
+	t.Run("PerformsDeepCopyOfReserves", func(t *testing.T) {
+		// 1. Arrange: Create a view with a reserve we can modify.
+		originalReserve := big.NewInt(5000)
+		sourceView := []PoolView{
+			{ID: 10, Token0: 1, Token1: 2, Reserve0: originalReserve, Reserve1: big.NewInt(1), Type: 1, FeeBps: 30},
+		}
+
+		// 2. Act: Create the registry.
+		registry := NewUniswapV2RegistryFromViews(sourceView)
+
+		// 3. Mutate the original view's reserve *after* creating the registry.
+		sourceView[0].Reserve0.SetInt64(9999)
+
+		// 4. Assert: The reserve inside the registry should be unchanged.
+		internalView, err := getPoolById(10, registry)
+		require.NoError(t, err)
+		assert.Equal(t, 0, internalView.Reserve0.Cmp(big.NewInt(5000)), "Registry should hold a deep copy of reserves, not a pointer to the original")
+	})
+
+	t.Run("HandlesEmptyAndNilViews", func(t *testing.T) {
+		// Test with an empty slice
+		registryEmpty := NewUniswapV2RegistryFromViews([]PoolView{})
+		require.NotNil(t, registryEmpty)
+		assert.Empty(t, viewRegistry(registryEmpty))
+		assert.Empty(t, registryEmpty.idToIndex)
+
+		// Test with a nil slice
+		registryNil := NewUniswapV2RegistryFromViews(nil)
+		require.NotNil(t, registryNil)
+		assert.Empty(t, viewRegistry(registryNil))
+		assert.Empty(t, registryNil.idToIndex)
+	})
+}
