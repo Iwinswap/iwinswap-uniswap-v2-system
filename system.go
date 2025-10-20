@@ -159,9 +159,22 @@ type UniswapV2System struct {
 	logger             Logger
 }
 
-// NewUniswapV2System constructs and returns a new, fully initialized system.
-// It starts all background goroutines, making it a self-contained, "live" service upon creation.
+// NewUniswapV2System constructs a new, live system with an empty initial state.
 func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, error) {
+	registry := NewUniswapV2Registry()
+	return newUniswapV2System(ctx, cfg, registry)
+}
+
+// NewUniswapV2SystemFromViews constructs a new, live system from a snapshot of pool views.
+// This is the primary entry point for rehydrating the system's state on startup.
+func NewUniswapV2SystemFromViews(ctx context.Context, cfg *Config, views []PoolView) (*UniswapV2System, error) {
+	registry := NewUniswapV2RegistryFromViews(views)
+	return newUniswapV2System(ctx, cfg, registry)
+}
+
+// newUniswapV2System constructs and returns a new, fully initialized system.
+// It starts all background goroutines, making it a self-contained, "live" service upon creation.
+func newUniswapV2System(ctx context.Context, cfg *Config, registry *UniswapV2Registry) (*UniswapV2System, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("invalid uniswapv2 system configuration: %w", err)
 	}
@@ -195,7 +208,7 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 		pruneFrequency:     cfg.PruneFrequency,
 		initFrequency:      cfg.InitFrequency,
 		resyncFrequency:    cfg.ResyncFrequency,
-		registry:           NewUniswapV2Registry(),
+		registry:           registry,
 		pendingInit:        make(map[common.Address]struct{}),
 		lastUpdatedAtBlock: atomic.Uint64{},
 		logMaxRetries:      cfg.LogMaxRetries,
@@ -204,7 +217,9 @@ func NewUniswapV2System(ctx context.Context, cfg *Config) (*UniswapV2System, err
 		logger:             cfg.Logger,
 	}
 
-	system.cachedView.Store(&[]PoolView{})
+	// store initial view
+	initialView := viewRegistry(registry)
+	system.cachedView.Store(&initialView)
 	system.logger.Info("UniswapV2System started", "system", system.systemName)
 	go system.listenBlockEventer(ctx)
 	go system.startPruner(ctx)

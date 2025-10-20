@@ -550,3 +550,62 @@ func TestUniswapV2System(t *testing.T) {
 
 	// @todo add test for getLogsWithRetry to ensure retries are made if config.LogMaxRetries > 0
 }
+
+// TestNewUniswapV2SystemFromViews provides a dedicated unit test for the "rehydration" constructor.
+// It uses a minimal, tailored mock configuration to focus solely on verifying that the system
+// is correctly initialized from a snapshot, without the overhead of the full runtime test harness.
+func TestNewUniswapV2SystemFromViews(t *testing.T) {
+	t.Parallel()
+
+	// 1. Arrange: Create the source view that represents the snapshot data.
+	sourceView := []PoolView{
+		{ID: 1001, Token0: 101, Token1: 102, Reserve0: big.NewInt(1000), Reserve1: big.NewInt(2000), Type: 1, FeeBps: 30},
+		{ID: 1002, Token0: 101, Token1: 103, Reserve0: big.NewInt(3000), Reserve1: big.NewInt(4000), Type: 2, FeeBps: 5},
+	}
+
+	// 2. Arrange: Create a minimal, valid configuration. Most dependencies can be
+	// simple stubs because they are not executed by the constructor itself.
+	cfg := &Config{
+		SystemName:      "test_from_view",
+		PrometheusReg:   prometheus.NewRegistry(),
+		NewBlockEventer: make(chan *types.Block),
+		GetClient:       func() (ethclients.ETHClient, error) { return nil, errors.New("not implemented") },
+		InBlockedList:   func(common.Address) bool { return false },
+		PoolInitializer: func(ctx context.Context, poolAddr []common.Address, client ethclients.ETHClient) (token0 []common.Address, token1 []common.Address, poolType []uint8, feeBps []uint16, reserve0 []*big.Int, reserve1 []*big.Int, errs []error) {
+			return
+		},
+		DiscoverPools: func(l []types.Log) ([]common.Address, error) { return nil, nil },
+		UpdatedInBlock: func(l []types.Log) (pools []common.Address, reserve0 []*big.Int, reserve1 []*big.Int, err error) {
+			return
+		},
+		GetReserves: func(ctx context.Context, poolAddrs []common.Address, client ethclients.ETHClient) (reserve0 []*big.Int, reserve1 []*big.Int, errs []error) {
+			return
+		},
+		TokenAddressToID: func(common.Address) (uint64, error) { return 0, errors.New("not implemented") },
+		PoolAddressToID:  func(common.Address) (uint64, error) { return 0, errors.New("not implemented") },
+		PoolIDToAddress:  func(uint64) (common.Address, error) { return common.Address{}, errors.New("not implemented") },
+		RegisterPool:     func(token0, token1, poolAddr common.Address) (poolID uint64, err error) { return },
+		RegisterPools:    func(token0s, token1s, poolAddrs []common.Address) (poolIDS []uint64, error []error) { return },
+		ErrorHandler:     func(err error) { t.Errorf("unexpected error: %v", err) },
+		TestBloom:        func(types.Bloom) bool { return false },
+		FilterTopics:     [][]common.Hash{{}}, // Must not be empty to pass validation
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Cancel the context to stop the background goroutines started by the constructor.
+
+	// 3. Act: Call the constructor with the minimal config and the source view.
+	system, err := NewUniswapV2SystemFromViews(ctx, cfg, sourceView)
+
+	// 4. Assert:
+	require.NoError(t, err)
+	require.NotNil(t, system)
+
+	// The most important assertion: check if the public View() method returns
+	// the state we initialized the system with. This verifies that both the
+	// internal registry and the read-optimized cached view were set up correctly.
+	currentView := system.View()
+	assert.ElementsMatch(t, sourceView, currentView, "System's initial view should match the snapshot data")
+
+}
