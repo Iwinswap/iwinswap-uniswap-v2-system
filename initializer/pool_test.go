@@ -246,8 +246,8 @@ func TestPoolInitializer(t *testing.T) {
 				tc.setupHandler(t, client)
 			}
 
-			initializer := NewPoolInitializer(knownFactories)
-
+			initializer, err := NewPoolInitializer(knownFactories, 25)
+			require.NoError(t, err)
 			ctx := context.Background()
 			if tc.name == "Context Cancellation" {
 				var cancel context.CancelFunc
