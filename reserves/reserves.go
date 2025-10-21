@@ -24,9 +24,10 @@ const (
 	defaultRPCTimeout = 10 * time.Second
 )
 
-// NewGetReserves returns a new function for fetching reserves that limits the
-// number of concurrent RPC calls to the provided `maxConcurrentCalls`.
-// it  returns a function that matches the uniswapv2.GetReservesFunc type and can be injected as a dependency
+// NewGetReserves returns a new function for fetching reserves. The returned
+// function will limit its own concurrent RPC calls to the provided `maxConcurrentCalls`.
+// Each call to the returned function manages its own concurrency pool, ensuring that
+// separate calls do not block each other.
 func NewGetReserves(
 	maxConcurrentCalls int,
 ) func(
@@ -35,9 +36,7 @@ func NewGetReserves(
 	client ethclients.ETHClient,
 ) (reserve0s, reserve1s []*big.Int, errs []error) {
 
-	// The returned function closes over the semaphore channel.
-	semaphore := make(chan struct{}, maxConcurrentCalls)
-
+	// The returned function will create a new semaphore for each execution.
 	return func(
 		ctx context.Context,
 		poolAddrs []common.Address,
@@ -47,6 +46,10 @@ func NewGetReserves(
 		if numPools == 0 {
 			return nil, nil, nil
 		}
+
+		// A new semaphore is created for each call to this function, scoping the
+		// concurrency limit to this specific batch operation.
+		semaphore := make(chan struct{}, maxConcurrentCalls)
 
 		// Pre-allocate result slices to the exact size needed. This is crucial for
 		// safely writing results from concurrent goroutines into the correct index.
@@ -58,8 +61,7 @@ func NewGetReserves(
 		wg.Add(numPools)
 
 		for i, addr := range poolAddrs {
-			// This will block until a spot is available in the semaphore channel,
-			// effectively limiting the number of concurrent goroutines.
+			// This will block until a spot is available in this call's specific semaphore.
 			semaphore <- struct{}{}
 
 			go func(index int, poolAddr common.Address) {
